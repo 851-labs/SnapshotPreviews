@@ -153,14 +153,16 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     completion: @escaping (Result<NSImage, any Error>) -> Void
   ) {
     let window = chromeWindow
+    let screen = NSScreen.main?.frame ?? .zero
+    // Far off screen while it's laid out, since it grows from its bottom edge.
+    window.setFrameOrigin(NSPoint(x: screen.minX - 20_000, y: screen.minY - 20_000))
     window.orderFront(nil)
     layOut(preview, in: window) { _, _, _ in
-      if let screen = NSScreen.main {
-        let size = window.frame.size
-        window.setFrameOrigin(
-          NSPoint(x: screen.frame.minX - size.width + 1, y: screen.frame.minY - size.height + 1))
-      }
-      if let view = window.contentView { Self.holdStill(view) }
+      let size = window.frame.size
+      window.setFrameOrigin(
+        NSPoint(x: screen.minX - size.width + 1, y: screen.minY - size.height + 1))
+      // The frame view too, for its title bar and toolbar.
+      if let view = window.contentView?.superview ?? window.contentView { Self.holdStill(view) }
       window.displayIfNeeded()
       Task { @MainActor in
         completion(await Self.screenCapture(window))
@@ -169,19 +171,25 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   }
 
   /// Stops what would otherwise move between captures, as the window server draws it: spinners,
-  /// Core Animation and overlay scrollers, which fade.
+  /// Core Animation and overlay scrollers, which flash, then fade. Scrollers are hidden rather
+  /// than removed, which would lay out legacy scrollers' content again.
   @MainActor private static func holdStill(_ view: NSView) {
     if let indicator = view as? NSProgressIndicator, indicator.isIndeterminate {
       indicator.isDisplayedWhenStopped = true
       indicator.stopAnimation(nil)
     }
     if let scrollView = view as? NSScrollView {
-      scrollView.hasVerticalScroller = false
-      scrollView.hasHorizontalScroller = false
+      scrollView.verticalScroller?.isHidden = true
+      scrollView.horizontalScroller?.isHidden = true
     }
     view.layer?.speed = 0
     view.layer?.timeOffset = 0
     view.subviews.forEach(holdStill)
+  }
+
+  /// The window server didn't show a window at its size in time, e.g. while the screen is locked.
+  struct WindowNotShown: Error {
+    let size: CGSize
   }
 
   /// The window as the screen shows it, at its full size, without its shadow.
@@ -189,18 +197,20 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   @MainActor private static func screenCapture(_ window: NSWindow) async -> Result<NSImage, any Error> {
     do {
       // Wait for the window server to show the window at its new size: capturing sooner gets
-      // the size it had before.
+      // the size it had before. It may round the size to pixels.
       var scWindow: SCWindow?
       for _ in 0..<40 {
         try await Task.sleep(for: .milliseconds(50))
         let content = try await SCShareableContent.excludingDesktopWindows(
           false, onScreenWindowsOnly: false)
         scWindow = content.windows.first(where: {
-          $0.windowID == CGWindowID(window.windowNumber) && $0.frame.size == window.frame.size
+          $0.windowID == CGWindowID(window.windowNumber)
+            && abs($0.frame.width - window.frame.width) < 1
+            && abs($0.frame.height - window.frame.height) < 1
         })
         if scWindow != nil { break }
       }
-      guard let scWindow else { return .failure(RenderingError.failedRendering(window.frame.size)) }
+      guard let scWindow else { throw WindowNotShown(size: window.frame.size) }
       let filter = SCContentFilter(desktopIndependentWindow: scWindow)
       let configuration = SCStreamConfiguration()
       let scale = CGFloat(filter.pointPixelScale)
