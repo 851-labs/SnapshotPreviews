@@ -18,11 +18,15 @@ public struct Preview: Identifiable {
 
 #if compiler(>=5.9)
   @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
-  init?(preview: DeveloperToolsSupport.Preview) {
+  init?(
+    preview: DeveloperToolsSupport.Preview,
+    remake: (@MainActor () -> DeveloperToolsSupport.Preview?)? = nil
+  ) {
     previewId = "0"
     var orientation: InterfaceOrientation = .portrait
     device = nil
     index = 0
+    let original = preview
     let preview = Mirror(reflecting: preview)
     let traits = preview.descendant("traits")! as! [Any]
     var layout = PreviewLayout.device
@@ -42,36 +46,51 @@ public struct Preview: Identifiable {
     self.orientation = orientation
     self.layout = layout
     displayName = preview.descendant("displayName") as? String
+    guard let _view = Self.viewMaker(original, displayName: displayName) else {
+      return nil
+    }
+    if let remake {
+      // A preview's traits take effect when it's made: swift-dependencies' `.dependencies` trait,
+      // for one, prepares its dependencies then. Made once up front, every preview would render
+      // with whichever was made last, so it's made again as it renders, as Xcode does.
+      let displayName = displayName
+      self._view = {
+        let maker = remake().flatMap { Self.viewMaker($0, displayName: displayName) } ?? _view
+        return maker()
+      }
+    } else {
+      self._view = _view
+    }
+  }
+
+  /// What makes a preview's view, from its source.
+  @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+  private static func viewMaker(
+    _ preview: DeveloperToolsSupport.Preview, displayName: String?
+  ) -> (@MainActor () -> any View)? {
+    let preview = Mirror(reflecting: preview)
     guard let source = preview.descendant("source") ?? preview.descendant("dataSource", "preview") else {
       assertionFailure("Preview \(preview) missing source, found: \(preview.children)")
       return nil
     }
-    let _view: @MainActor () -> any View
     if let source = source as? MakeViewProvider {
-      _view = {
+      return {
         return source.makeView()
       }
-    } else {
-      #if canImport(UIKit) && !os(watchOS)
-      if let source = source as? MakeUIViewProvider {
-        _view = {
-          return UIViewWrapper(source.makeView)
-        }
-      } else if let source = source as? MakeViewControllerProvider {
-        _view = {
-          return UIViewControllerWrapper(source.makeViewController)
-        }
-      } else {
-        print("Preview \(preview) (\(displayName ?? "no display name")) did not have matching source type")
-        return nil
-      }
-      #else
-      print("Preview \(preview) (\(displayName ?? "no display name")) did not have matching source type")
-      return nil
-      #endif
     }
-
-    self._view = _view
+    #if canImport(UIKit) && !os(watchOS)
+    if let source = source as? MakeUIViewProvider {
+      return {
+        return UIViewWrapper(source.makeView)
+      }
+    } else if let source = source as? MakeViewControllerProvider {
+      return {
+        return UIViewControllerWrapper(source.makeViewController)
+      }
+    }
+    #endif
+    print("Preview \(preview) (\(displayName ?? "no display name")) did not have matching source type")
+    return nil
   }
 #endif
 
@@ -105,7 +124,10 @@ public struct PreviewType: Hashable, Identifiable {
     self.typeName = typeName
     self.fileID = A.fileID
     self.line = A.line
-    guard let internalPreview = try? A.makePreview(), let preview = Preview(preview: internalPreview)  else {
+    guard
+      let internalPreview = try? A.makePreview(),
+      let preview = Preview(preview: internalPreview, remake: { try? A.makePreview() })
+    else {
       return nil
     }
     self.previews = [preview]
