@@ -345,6 +345,11 @@ open class SnapshotTest: PreviewBaseTest, PreviewFilters {
     }
 
     let imageFileName = FileNameUtils.imageFileName(from: rawBaseFileName)
+    // A preview that didn't render fails, rather than leaving its image out unnoticed.
+    if case .failure(let error) = result.image {
+      XCTFail("Couldn't render \(imageFileName): \(error)")
+      return
+    }
     if let coordinator = Self.ciExportCoordinator {
       let colorSchemeValue = result.colorScheme.flatMap { $0.stringValue }
       let context = SnapshotContext(
