@@ -10,6 +10,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import SnapshotSharedModels
+import ScreenCaptureKit
 
 class BorderlessWindow: NSWindow {
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
@@ -19,19 +20,39 @@ class BorderlessWindow: NSWindow {
     }
 }
 
+/// A titled window for previews that fill one: it can be taller than the screen, and sit almost
+/// entirely off it.
+class ChromeWindow: NSWindow {
+  init() {
+    super.init(
+      contentRect: NSRect(origin: .zero, size: AppKitContainer.defaultSize),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+      backing: .buffered, defer: false)
+    toolbarStyle = .unified
+    isReleasedWhenClosed = false
+  }
+
+  override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+    frameRect
+  }
+}
+
 private var _colorScheme: ColorScheme? = nil
 
 public class AppKitRenderingStrategy: RenderingStrategy {
 
   private let window: NSWindow
-  /// The mode for previews that don't set one with `emergeRenderingMode`.
-  private let defaultMode: EmergeRenderingMode
+  /// Whether previews that fill a window are captured from a titled one, as the screen shows it.
+  private let capturesWindows: Bool
+  private lazy var chromeWindow = ChromeWindow()
 
-  /// - Parameter defaultMode: How to capture previews that don't choose. `.nsView` draws the view
-  ///   with `cacheDisplay`, which misses vibrant content such as sidebar icons; `.window` captures
-  ///   the window as the screen shows it.
-  public init(defaultMode: EmergeRenderingMode = .nsView) {
-    self.defaultMode = defaultMode
+  /// - Parameter capturesWindows: Capture previews that put something in a window's chrome (a
+  ///   split view, a navigation title or toolbar items) from a titled window, with ScreenCaptureKit,
+  ///   so their title bar, toolbar and vibrant content (such as a sidebar's icons) come out as the
+  ///   screen shows them. Drawing a view (`cacheDisplay`, the default) misses those. Other previews
+  ///   are drawn as before. Needs Screen Recording access.
+  public init(capturesWindows: Bool = false) {
+    self.capturesWindows = capturesWindows
     window = BorderlessWindow()
     window.makeKeyAndOrderFront(nil)
   }
@@ -40,6 +61,53 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     preview: SnapshotPreviewsCore.Preview,
     completion: @escaping (SnapshotResult) -> Void)
   {
+    let capturesWindows = capturesWindows
+    layOut(preview, in: window) { [weak self] vc, mode, metadata in
+      guard let self else { return }
+      let finish = { (image: NSImage?, frame: NSSize) in
+        completion(metadata.result(image: image, size: frame))
+      }
+      if #available(macOS 14.0, *), capturesWindows, mode == nil, let vc,
+        Self.fillsWindow(vc, in: self.window)
+      {
+        self.captureInChrome(preview) { image in finish(image, self.chromeWindow.frame.size) }
+      } else {
+        Self.takeSnapshot(mode: mode ?? .nsView, viewController: vc, window: self.window) { image in
+          finish(image, self.window.frame.size)
+        }
+      }
+    }
+  }
+
+  /// What a preview reported, for its result.
+  private struct Metadata {
+    let precision: Float?
+    let accessibilityEnabled: Bool?
+    let appStoreSnapshot: Bool?
+    let tags: [String: String]
+    let additionalContext: [String: SnapshotMetadataValue]
+    let groupOverride: SnapshotGroup?
+    let canvasTheme: SnapshotCanvasTheme?
+
+    func result(image: NSImage?, size: NSSize) -> SnapshotResult {
+      SnapshotResult(
+        image: image.map { .success($0) } ?? .failure(RenderingError.failedRendering(size)),
+        precision: precision,
+        accessibilityEnabled: accessibilityEnabled,
+        colorScheme: _colorScheme,
+        appStoreSnapshot: appStoreSnapshot,
+        tags: tags,
+        additionalContext: additionalContext,
+        groupOverride: groupOverride,
+        canvasTheme: canvasTheme)
+    }
+  }
+
+  /// Hosts `preview` in `window` and calls back once it's laid out, its scroll view expanded.
+  @MainActor private func layOut(
+    _ preview: SnapshotPreviewsCore.Preview, in window: NSWindow,
+    rendered: @escaping (AppKitContainer?, EmergeRenderingMode?, Metadata) -> Void
+  ) {
     var wrappedView = preview.view()
     _colorScheme = nil
     wrappedView = PreferredColorSchemeWrapper {
@@ -51,48 +119,81 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     vc.setupView(layout: preview.layout)
     // Reset the window size to default before adding the new view controller
     window.contentViewController = NSViewController()
+    window.title = ""
+    window.toolbar = nil
     window.setContentSize(AppKitContainer.defaultSize)
     window.contentViewController = vc
-    let defaultMode = defaultMode
-    vc.rendered = { [weak window, weak vc] mode, precision, accessibilityEnabled, appStoreSnapshot, tags, additionalContext, groupOverride, canvasTheme in
+    vc.rendered = { [weak vc] mode, precision, accessibilityEnabled, appStoreSnapshot, tags, additionalContext, groupOverride, canvasTheme in
       DispatchQueue.main.async {
-        Self.takeSnapshot(
-          mode: Self.windowMode(mode, default: defaultMode, window: window),
-          viewController: vc, window: window
-        ) { image in
-          completion(
-            SnapshotResult(
-              image: image != nil ? .success(image!) : .failure(RenderingError.failedRendering(window?.frame.size ?? .zero)),
-              precision: precision,
-              accessibilityEnabled: accessibilityEnabled,
-              colorScheme: _colorScheme,
-              appStoreSnapshot: appStoreSnapshot,
-              tags: tags,
-              additionalContext: additionalContext,
-              groupOverride: groupOverride,
-              canvasTheme: canvasTheme))
-        }
+        rendered(
+          vc, mode,
+          Metadata(
+            precision: precision, accessibilityEnabled: accessibilityEnabled,
+            appStoreSnapshot: appStoreSnapshot, tags: tags, additionalContext: additionalContext,
+            groupOverride: groupOverride, canvasTheme: canvasTheme))
       }
     }
   }
 
-  /// The mode to capture with. A window is captured as the screen shows it, so only its on-screen
-  /// part comes out: it's moved fully on screen first. When it's too big for the screen, as a
-  /// preview whose scroll view grew can be, the default falls back to drawing the view.
-  @MainActor private static func windowMode(
-    _ mode: EmergeRenderingMode?, default defaultMode: EmergeRenderingMode, window: NSWindow?
-  ) -> EmergeRenderingMode {
-    let resolved = mode ?? defaultMode
-    guard resolved == .window, let window, let screen = window.screen ?? NSScreen.main else {
-      return resolved
+  /// Whether a preview puts something in its window's chrome: a split view (a sidebar), a
+  /// navigation title or toolbar items.
+  @MainActor private static func fillsWindow(_ vc: NSViewController, in window: NSWindow) -> Bool {
+    func hasSplitView(_ view: NSView) -> Bool {
+      view is NSSplitView || view.subviews.contains(where: hasSplitView)
     }
-    let visible = screen.visibleFrame
-    guard window.frame.width <= visible.width, window.frame.height <= visible.height else {
-      return mode == nil ? .nsView : resolved
+    return !window.title.isEmpty || window.toolbar?.items.isEmpty == false || hasSplitView(vc.view)
+  }
+
+  /// Renders `preview` again in the titled window and captures it as the screen shows it. The
+  /// window sits off screen but for one point at the display's corner: ScreenCaptureKit captures
+  /// windows that are partly on screen, whatever their size, but not ones entirely off it.
+  @available(macOS 14.0, *)
+  @MainActor private func captureInChrome(
+    _ preview: SnapshotPreviewsCore.Preview, completion: @escaping (NSImage?) -> Void
+  ) {
+    let window = chromeWindow
+    window.orderFront(nil)
+    layOut(preview, in: window) { _, _, _ in
+      if let screen = NSScreen.main {
+        let size = window.frame.size
+        window.setFrameOrigin(
+          NSPoint(x: screen.frame.minX - size.width + 1, y: screen.frame.minY - size.height + 1))
+      }
+      window.displayIfNeeded()
+      Task { @MainActor in
+        // A frame for the window server to show the window where it is now.
+        try? await Task.sleep(for: .milliseconds(50))
+        completion(await Self.screenCapture(window))
+      }
     }
-    window.setFrameTopLeftPoint(NSPoint(x: visible.minX, y: visible.maxY))
-    window.displayIfNeeded()
-    return resolved
+  }
+
+  /// The window as the screen shows it, at its full size, without its shadow.
+  @available(macOS 14.0, *)
+  @MainActor private static func screenCapture(_ window: NSWindow) async -> NSImage? {
+    do {
+      let content = try await SCShareableContent.excludingDesktopWindows(
+        false, onScreenWindowsOnly: false)
+      guard
+        let scWindow = content.windows.first(where: {
+          $0.windowID == CGWindowID(window.windowNumber)
+        })
+      else { return nil }
+      let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+      let configuration = SCStreamConfiguration()
+      let scale = CGFloat(filter.pointPixelScale)
+      configuration.width = Int(filter.contentRect.width * scale)
+      configuration.height = Int(filter.contentRect.height * scale)
+      configuration.ignoreShadowsSingleWindow = true
+      configuration.showsCursor = false
+      configuration.captureResolution = .best
+      let image = try await SCScreenshotManager.captureImage(
+        contentFilter: filter, configuration: configuration)
+      return NSImage(cgImage: image, size: filter.contentRect.size)
+    } catch {
+      print("Couldn't capture \(window.title.isEmpty ? "a window" : window.title): \(error)")
+      return nil
+    }
   }
 
   private static func takeSnapshot(mode: EmergeRenderingMode, viewController: NSViewController?, window: NSWindow?, completion: @escaping (NSImage?) -> Void) {
@@ -163,6 +264,11 @@ final class AppKitContainer: NSHostingController<EmergeModifierView>, ScrollExpa
 
     if #available(macOS 13.0, *) {
       sizingOptions = .intrinsicContentSize
+    }
+    // The window takes the preview's navigation title and toolbar, as in an app, so a preview
+    // that fills a window can be told apart, and shows them when captured in a titled one.
+    if #available(macOS 14.0, *) {
+      sceneBridgingOptions = [.title, .toolbars]
     }
     view.translatesAutoresizingMaskIntoConstraints = false
   }

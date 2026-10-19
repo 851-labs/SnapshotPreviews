@@ -194,9 +194,10 @@ open class SnapshotTest: PreviewBaseTest, PreviewFilters {
   }
 
   #if canImport(AppKit) && !targetEnvironment(macCatalyst)
-  /// Whether to capture each preview from its window, as the screen shows it, rather than draw its
-  /// view with `cacheDisplay`, which misses vibrant content such as a sidebar's icons. A preview's
-  /// own `emergeRenderingMode` still wins.
+  /// Whether previews that fill a window (a split view, a navigation title or toolbar items) are
+  /// captured from a titled window with ScreenCaptureKit, as the screen shows them: title bar,
+  /// toolbar and vibrant content such as a sidebar's icons. Others are drawn as before. Needs
+  /// Screen Recording access. A preview's own `emergeRenderingMode` still wins.
   open class func capturesWindow() -> Bool {
     false
   }
@@ -219,7 +220,7 @@ open class SnapshotTest: PreviewBaseTest, PreviewFilters {
   #else
   private static func makeRenderingStrategy() -> RenderingStrategy {
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
-      AppKitRenderingStrategy(defaultMode: capturesWindow() ? .window : .nsView)
+      AppKitRenderingStrategy(capturesWindows: capturesWindow())
     #else
     if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, visionOS 1.0, *) {
       SwiftUIRenderingStrategy()
