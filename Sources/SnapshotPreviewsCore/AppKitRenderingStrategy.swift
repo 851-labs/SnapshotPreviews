@@ -160,26 +160,47 @@ public class AppKitRenderingStrategy: RenderingStrategy {
         window.setFrameOrigin(
           NSPoint(x: screen.frame.minX - size.width + 1, y: screen.frame.minY - size.height + 1))
       }
+      if let view = window.contentView { Self.holdStill(view) }
       window.displayIfNeeded()
       Task { @MainActor in
-        // A frame for the window server to show the window where it is now.
-        try? await Task.sleep(for: .milliseconds(50))
         completion(await Self.screenCapture(window))
       }
     }
+  }
+
+  /// Stops what would otherwise move between captures, as the window server draws it: spinners,
+  /// Core Animation and overlay scrollers, which fade.
+  @MainActor private static func holdStill(_ view: NSView) {
+    if let indicator = view as? NSProgressIndicator, indicator.isIndeterminate {
+      indicator.isDisplayedWhenStopped = true
+      indicator.stopAnimation(nil)
+    }
+    if let scrollView = view as? NSScrollView {
+      scrollView.hasVerticalScroller = false
+      scrollView.hasHorizontalScroller = false
+    }
+    view.layer?.speed = 0
+    view.layer?.timeOffset = 0
+    view.subviews.forEach(holdStill)
   }
 
   /// The window as the screen shows it, at its full size, without its shadow.
   @available(macOS 14.0, *)
   @MainActor private static func screenCapture(_ window: NSWindow) async -> Result<NSImage, any Error> {
     do {
-      let content = try await SCShareableContent.excludingDesktopWindows(
-        false, onScreenWindowsOnly: false)
-      guard
-        let scWindow = content.windows.first(where: {
-          $0.windowID == CGWindowID(window.windowNumber)
+      // Wait for the window server to show the window at its new size: capturing sooner gets
+      // the size it had before.
+      var scWindow: SCWindow?
+      for _ in 0..<40 {
+        try await Task.sleep(for: .milliseconds(50))
+        let content = try await SCShareableContent.excludingDesktopWindows(
+          false, onScreenWindowsOnly: false)
+        scWindow = content.windows.first(where: {
+          $0.windowID == CGWindowID(window.windowNumber) && $0.frame.size == window.frame.size
         })
-      else { return .failure(RenderingError.failedRendering(window.frame.size)) }
+        if scWindow != nil { break }
+      }
+      guard let scWindow else { return .failure(RenderingError.failedRendering(window.frame.size)) }
       let filter = SCContentFilter(desktopIndependentWindow: scWindow)
       let configuration = SCStreamConfiguration()
       let scale = CGFloat(filter.pointPixelScale)
