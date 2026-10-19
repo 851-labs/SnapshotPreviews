@@ -65,12 +65,12 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     layOut(preview, in: window) { [weak self] vc, mode, metadata in
       guard let self else { return }
       let finish = { (image: NSImage?, frame: NSSize) in
-        completion(metadata.result(image: image, size: frame))
+        completion(metadata.result(image.map { .success($0) } ?? .failure(RenderingError.failedRendering(frame))))
       }
       if #available(macOS 14.0, *), capturesWindows, mode == nil, let vc,
         Self.fillsWindow(vc, in: self.window)
       {
-        self.captureInChrome(preview) { image in finish(image, self.chromeWindow.frame.size) }
+        self.captureInChrome(preview) { image in completion(metadata.result(image)) }
       } else {
         Self.takeSnapshot(mode: mode ?? .nsView, viewController: vc, window: self.window) { image in
           finish(image, self.window.frame.size)
@@ -89,9 +89,9 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     let groupOverride: SnapshotGroup?
     let canvasTheme: SnapshotCanvasTheme?
 
-    func result(image: NSImage?, size: NSSize) -> SnapshotResult {
+    func result(_ image: Result<NSImage, any Error>) -> SnapshotResult {
       SnapshotResult(
-        image: image.map { .success($0) } ?? .failure(RenderingError.failedRendering(size)),
+        image: image,
         precision: precision,
         accessibilityEnabled: accessibilityEnabled,
         colorScheme: _colorScheme,
@@ -149,7 +149,8 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   /// windows that are partly on screen, whatever their size, but not ones entirely off it.
   @available(macOS 14.0, *)
   @MainActor private func captureInChrome(
-    _ preview: SnapshotPreviewsCore.Preview, completion: @escaping (NSImage?) -> Void
+    _ preview: SnapshotPreviewsCore.Preview,
+    completion: @escaping (Result<NSImage, any Error>) -> Void
   ) {
     let window = chromeWindow
     window.orderFront(nil)
@@ -170,7 +171,7 @@ public class AppKitRenderingStrategy: RenderingStrategy {
 
   /// The window as the screen shows it, at its full size, without its shadow.
   @available(macOS 14.0, *)
-  @MainActor private static func screenCapture(_ window: NSWindow) async -> NSImage? {
+  @MainActor private static func screenCapture(_ window: NSWindow) async -> Result<NSImage, any Error> {
     do {
       let content = try await SCShareableContent.excludingDesktopWindows(
         false, onScreenWindowsOnly: false)
@@ -178,7 +179,7 @@ public class AppKitRenderingStrategy: RenderingStrategy {
         let scWindow = content.windows.first(where: {
           $0.windowID == CGWindowID(window.windowNumber)
         })
-      else { return nil }
+      else { return .failure(RenderingError.failedRendering(window.frame.size)) }
       let filter = SCContentFilter(desktopIndependentWindow: scWindow)
       let configuration = SCStreamConfiguration()
       let scale = CGFloat(filter.pointPixelScale)
@@ -189,10 +190,9 @@ public class AppKitRenderingStrategy: RenderingStrategy {
       configuration.captureResolution = .best
       let image = try await SCScreenshotManager.captureImage(
         contentFilter: filter, configuration: configuration)
-      return NSImage(cgImage: image, size: filter.contentRect.size)
+      return .success(NSImage(cgImage: image, size: filter.contentRect.size))
     } catch {
-      print("Couldn't capture \(window.title.isEmpty ? "a window" : window.title): \(error)")
-      return nil
+      return .failure(RenderingError.screenCaptureFailed(error))
     }
   }
 

@@ -12,6 +12,9 @@ public enum RenderingError: Error {
   case maxSize(CGSize)
   case expandingViewTimeout(CGSize)
   case orientationChangeTimeout
+  /// ScreenCaptureKit couldn't capture a preview's window, e.g. without Screen Recording access
+  /// (SCStreamError -3801).
+  case screenCaptureFailed(any Error)
 }
 
 #if canImport(UIKit) && !os(visionOS) && !os(watchOS) && !os(tvOS)
