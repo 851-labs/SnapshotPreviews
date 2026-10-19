@@ -193,6 +193,15 @@ open class SnapshotTest: PreviewBaseTest, PreviewFilters {
     nil
   }
 
+  #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+  /// Whether to capture each preview from its window, as the screen shows it, rather than draw its
+  /// view with `cacheDisplay`, which misses vibrant content such as a sidebar's icons. A preview's
+  /// own `emergeRenderingMode` still wins.
+  open class func capturesWindow() -> Bool {
+    false
+  }
+  #endif
+
   #if canImport(UIKit) && !os(watchOS) && !os(visionOS) && !os(tvOS)
   open class func setupA11y() -> ((UIViewController, UIWindow, PreviewLayout) -> UIView)? {
     return nil
@@ -210,7 +219,7 @@ open class SnapshotTest: PreviewBaseTest, PreviewFilters {
   #else
   private static func makeRenderingStrategy() -> RenderingStrategy {
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
-      AppKitRenderingStrategy()
+      AppKitRenderingStrategy(defaultMode: capturesWindow() ? .window : .nsView)
     #else
     if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, visionOS 1.0, *) {
       SwiftUIRenderingStrategy()

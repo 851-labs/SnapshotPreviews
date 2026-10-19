@@ -24,8 +24,14 @@ private var _colorScheme: ColorScheme? = nil
 public class AppKitRenderingStrategy: RenderingStrategy {
 
   private let window: NSWindow
+  /// The mode for previews that don't set one with `emergeRenderingMode`.
+  private let defaultMode: EmergeRenderingMode
 
-  public init() {
+  /// - Parameter defaultMode: How to capture previews that don't choose. `.nsView` draws the view
+  ///   with `cacheDisplay`, which misses vibrant content such as sidebar icons; `.window` captures
+  ///   the window as the screen shows it.
+  public init(defaultMode: EmergeRenderingMode = .nsView) {
+    self.defaultMode = defaultMode
     window = BorderlessWindow()
     window.makeKeyAndOrderFront(nil)
   }
@@ -47,9 +53,10 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     window.contentViewController = NSViewController()
     window.setContentSize(AppKitContainer.defaultSize)
     window.contentViewController = vc
+    let defaultMode = defaultMode
     vc.rendered = { [weak window, weak vc] mode, precision, accessibilityEnabled, appStoreSnapshot, tags, additionalContext, groupOverride, canvasTheme in
       DispatchQueue.main.async {
-        Self.takeSnapshot(mode: mode ?? .nsView, viewController: vc, window: window) { image in
+        Self.takeSnapshot(mode: mode ?? defaultMode, viewController: vc, window: window) { image in
           completion(
             SnapshotResult(
               image: image != nil ? .success(image!) : .failure(RenderingError.failedRendering(window?.frame.size ?? .zero)),
