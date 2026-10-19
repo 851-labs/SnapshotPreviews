@@ -56,7 +56,10 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     let defaultMode = defaultMode
     vc.rendered = { [weak window, weak vc] mode, precision, accessibilityEnabled, appStoreSnapshot, tags, additionalContext, groupOverride, canvasTheme in
       DispatchQueue.main.async {
-        Self.takeSnapshot(mode: mode ?? defaultMode, viewController: vc, window: window) { image in
+        Self.takeSnapshot(
+          mode: Self.windowMode(mode, default: defaultMode, window: window),
+          viewController: vc, window: window
+        ) { image in
           completion(
             SnapshotResult(
               image: image != nil ? .success(image!) : .failure(RenderingError.failedRendering(window?.frame.size ?? .zero)),
@@ -71,6 +74,25 @@ public class AppKitRenderingStrategy: RenderingStrategy {
         }
       }
     }
+  }
+
+  /// The mode to capture with. A window is captured as the screen shows it, so only its on-screen
+  /// part comes out: it's moved fully on screen first. When it's too big for the screen, as a
+  /// preview whose scroll view grew can be, the default falls back to drawing the view.
+  @MainActor private static func windowMode(
+    _ mode: EmergeRenderingMode?, default defaultMode: EmergeRenderingMode, window: NSWindow?
+  ) -> EmergeRenderingMode {
+    let resolved = mode ?? defaultMode
+    guard resolved == .window, let window, let screen = window.screen ?? NSScreen.main else {
+      return resolved
+    }
+    let visible = screen.visibleFrame
+    guard window.frame.width <= visible.width, window.frame.height <= visible.height else {
+      return mode == nil ? .nsView : resolved
+    }
+    window.setFrameTopLeftPoint(NSPoint(x: visible.minX, y: visible.maxY))
+    window.displayIfNeeded()
+    return resolved
   }
 
   private static func takeSnapshot(mode: EmergeRenderingMode, viewController: NSViewController?, window: NSWindow?, completion: @escaping (NSImage?) -> Void) {
