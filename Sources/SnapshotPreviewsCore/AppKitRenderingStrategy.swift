@@ -198,35 +198,33 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   @available(macOS 14.0, *)
   @MainActor private static func screenCapture(_ window: NSWindow) async -> Result<NSImage, any Error> {
     do {
-      // Wait for the window server to show the window at its new size: capturing sooner gets
-      // the size it had before. It may round the size to pixels.
-      var scWindow: SCWindow?
-      for _ in 0..<40 {
-        try await Task.sleep(for: .milliseconds(50))
-        let content = try await SCShareableContent.excludingDesktopWindows(
-          false, onScreenWindowsOnly: false)
-        scWindow = content.windows.first(where: {
-          $0.windowID == CGWindowID(window.windowNumber)
-            && abs($0.frame.width - window.frame.width) < 1
-            && abs($0.frame.height - window.frame.height) < 1
-        })
-        if scWindow != nil { break }
+      var filter = try await contentFilter(window)
+      // ScreenCaptureKit sometimes fails to start a capture's stream (-3811) for a window right
+      // after capturing others, though the same window captures on its own. Tried again a few
+      // times in all, with the window looked up again, waiting longer each time, and logged.
+      var retries = 0
+      func capture() async throws -> CGImage {
+        while true {
+          do {
+            return try await SCScreenshotManager.captureImage(
+              contentFilter: filter, configuration: configuration(filter))
+          } catch let error as NSError
+            where error.domain == SCStreamErrorDomain
+            && error.code == SCStreamError.Code.failedToStart.rawValue && retries < 5
+          {
+            retries += 1
+            print("SnapshotPreviews: a window capture's stream failed to start (-3811); trying again (\(retries) of 5)")
+            try await Task.sleep(for: .milliseconds(200 * retries))
+            filter = try await contentFilter(window)
+          }
+        }
       }
-      guard let scWindow else { throw WindowNotShown(size: window.frame.size) }
-      let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-      let configuration = SCStreamConfiguration()
-      let scale = CGFloat(filter.pointPixelScale)
-      configuration.width = Int(filter.contentRect.width * scale)
-      configuration.height = Int(filter.contentRect.height * scale)
-      configuration.ignoreShadowsSingleWindow = true
-      configuration.showsCursor = false
-      configuration.captureResolution = .best
       // Captured until two in a row match, so nothing still settling is caught midway. One that
       // never settles (a `TimelineView`, say) keeps its last capture, for `check` to catch.
       let attempts = 10
       var previous: Data?
       for attempt in 1...attempts {
-        let image = try await captureImage(filter, configuration)
+        let image = try await capture()
         let pixels = image.pixels
         if attempt == attempts || pixels == nil || pixels == previous {
           return .success(NSImage(cgImage: image, size: filter.contentRect.size))
@@ -240,26 +238,36 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     }
   }
 
-  /// One capture, tried again a few times if ScreenCaptureKit fails to start its stream
-  /// (`SCStreamError.failedToStart`, -3811), which it sometimes does for a window right after
-  /// capturing others, and then doesn't.
+  /// A filter for the window as the window server shows it. Waits for it to show the window at
+  /// its new size: capturing sooner gets the size it had before. It may round the size to pixels.
   @available(macOS 14.0, *)
-  @MainActor private static func captureImage(
-    _ filter: SCContentFilter, _ configuration: SCStreamConfiguration
-  ) async throws -> CGImage {
-    var tries = 0
-    while true {
-      do {
-        return try await SCScreenshotManager.captureImage(
-          contentFilter: filter, configuration: configuration)
-      } catch let error as NSError
-        where error.domain == SCStreamErrorDomain
-        && error.code == SCStreamError.Code.failedToStart.rawValue && tries < 5
-      {
-        tries += 1
-        try await Task.sleep(for: .milliseconds(200 * tries))
+  @MainActor private static func contentFilter(_ window: NSWindow) async throws -> SCContentFilter {
+    for _ in 0..<40 {
+      try await Task.sleep(for: .milliseconds(50))
+      let content = try await SCShareableContent.excludingDesktopWindows(
+        false, onScreenWindowsOnly: false)
+      if let scWindow = content.windows.first(where: {
+        $0.windowID == CGWindowID(window.windowNumber)
+          && abs($0.frame.width - window.frame.width) < 1
+          && abs($0.frame.height - window.frame.height) < 1
+      }) {
+        return SCContentFilter(desktopIndependentWindow: scWindow)
       }
     }
+    throw WindowNotShown(size: window.frame.size)
+  }
+
+  /// The window at its full size in pixels, without its shadow or the cursor.
+  @available(macOS 14.0, *)
+  private static func configuration(_ filter: SCContentFilter) -> SCStreamConfiguration {
+    let configuration = SCStreamConfiguration()
+    let scale = CGFloat(filter.pointPixelScale)
+    configuration.width = Int(filter.contentRect.width * scale)
+    configuration.height = Int(filter.contentRect.height * scale)
+    configuration.ignoreShadowsSingleWindow = true
+    configuration.showsCursor = false
+    configuration.captureResolution = .best
+    return configuration
   }
 
   private static func takeSnapshot(mode: EmergeRenderingMode, viewController: NSViewController?, window: NSWindow?, completion: @escaping (NSImage?) -> Void) {
