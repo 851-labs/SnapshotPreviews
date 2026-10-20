@@ -18,6 +18,9 @@ protocol ContentHeightProviding {
   var contentHeight: CGFloat { get }
 
   var visibleContentHeight: CGFloat { get }
+
+  /// Screen pixels per point where it's shown: 2 on a Retina Mac, 3 on most iPhones.
+  var pixelsPerPoint: CGFloat { get }
 }
 
 protocol FirstScrollViewProviding {
@@ -34,39 +37,33 @@ protocol ScrollExpansionProviding: AnyObject, FirstScrollViewProviding {
 extension ScrollExpansionProviding {
   func updateHeight(_ complete: (() -> Void)) {
     // If heightAnchor isn't set, this was a fixed size and we don't expand the scroll view
-    guard let heightAnchor else {
+    guard let heightAnchor, supportsExpansion, let scrollView = firstScrollView else {
       complete()
       return
     }
 
-    let supportsExpansion = supportsExpansion
-    let scrollView = firstScrollView
-    if let scrollView, supportsExpansion {
-      // The whole difference, fractions included: truncating it to whole points dropped up to a
-      // point per pass, and lists that settle over a different number of passes ended up
-      // different heights. Within a hundredth of a point, it's done.
-      let diff = scrollView.contentHeight - scrollView.visibleContentHeight
-      if abs(diff) >= 0.01 {
-        if previousHeight != nil || diff > 0 {
-          if let previousHeight {
-            // Check if expansion isn't working and we should give up.
-            // Could happen if the view is constrained to not grow, such as a half sheet
-            guard abs(previousHeight - scrollView.visibleContentHeight) >= 0.01 else {
-              complete()
-              return
-            }
-          }
-          previousHeight = scrollView.visibleContentHeight
-          heightAnchor.constant += diff
-        } else {
-          complete()
-        }
-      } else {
-        complete()
-      }
-    } else {
+    // Grown to show the content's height rounded up to whole pixels, however many passes the
+    // content settles over. Growing by the difference truncated to whole points, as upstream did,
+    // left a list a pixel or two short in some runs and not others (851-2768).
+    let pixel = 1 / max(scrollView.pixelsPerPoint, 1)
+    let target = (scrollView.contentHeight / pixel).rounded(.up) * pixel
+    let growth = target - scrollView.visibleContentHeight
+    // Within half a pixel, it shows all of it. It only shrinks back after growing.
+    guard abs(growth) >= pixel / 2, previousHeight != nil || growth > 0 else {
       complete()
+      return
     }
+    if let previousHeight {
+      // Check if expansion isn't working and we should give up.
+      // Could happen if the view is constrained to not grow, such as a half sheet, or if its
+      // content grows with it, a little more each pass.
+      guard abs(previousHeight - scrollView.visibleContentHeight) >= 1 else {
+        complete()
+        return
+      }
+    }
+    previousHeight = scrollView.visibleContentHeight
+    heightAnchor.constant += growth
   }
 }
 #endif
@@ -80,6 +77,11 @@ extension UIScrollView: ContentHeightProviding {
 
   var visibleContentHeight: CGFloat {
     frame.height - (adjustedContentInset.top + adjustedContentInset.bottom)
+  }
+
+  var pixelsPerPoint: CGFloat {
+    let scale = traitCollection.displayScale
+    return scale > 0 ? scale : window?.screen.scale ?? UIScreen.main.scale
   }
 }
 
@@ -118,6 +120,10 @@ extension NSScrollView: ContentHeightProviding {
 
   var visibleContentHeight: CGFloat {
     frame.height - (contentInsets.top + contentInsets.bottom)
+  }
+
+  var pixelsPerPoint: CGFloat {
+    window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
   }
 }
 
