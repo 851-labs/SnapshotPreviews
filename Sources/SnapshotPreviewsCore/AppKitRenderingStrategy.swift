@@ -226,8 +226,7 @@ public class AppKitRenderingStrategy: RenderingStrategy {
       let attempts = 10
       var previous: Data?
       for attempt in 1...attempts {
-        let image = try await SCScreenshotManager.captureImage(
-          contentFilter: filter, configuration: configuration)
+        let image = try await captureImage(filter, configuration)
         let pixels = image.pixels
         if attempt == attempts || pixels == nil || pixels == previous {
           return .success(NSImage(cgImage: image, size: filter.contentRect.size))
@@ -238,6 +237,28 @@ public class AppKitRenderingStrategy: RenderingStrategy {
       preconditionFailure("The last attempt returns")
     } catch {
       return .failure(RenderingError.screenCaptureFailed(error))
+    }
+  }
+
+  /// One capture, tried again a few times if ScreenCaptureKit fails to start its stream
+  /// (`SCStreamError.failedToStart`, -3811), which it sometimes does for a window right after
+  /// capturing others, and then doesn't.
+  @available(macOS 14.0, *)
+  @MainActor private static func captureImage(
+    _ filter: SCContentFilter, _ configuration: SCStreamConfiguration
+  ) async throws -> CGImage {
+    var tries = 0
+    while true {
+      do {
+        return try await SCScreenshotManager.captureImage(
+          contentFilter: filter, configuration: configuration)
+      } catch let error as NSError
+        where error.domain == SCStreamErrorDomain
+        && error.code == SCStreamError.Code.failedToStart.rawValue && tries < 5
+      {
+        tries += 1
+        try await Task.sleep(for: .milliseconds(200 * tries))
+      }
     }
   }
 
