@@ -31,15 +31,9 @@ extension View {
     var wrappedView: any View = self.transaction { transaction in
       transaction.disablesAnimations = true
     }
-    // A scroll view's edge effect blurs what's behind its top and bottom edges, which drawing
-    // the view off screen can't do: it comes out as a black band. At rest, with nothing scrolled
-    // under the edges, it shows nothing anyway.
-    if #available(iOS 26.0, *) {
-      wrappedView = AnyView(wrappedView).scrollEdgeEffectHidden()
-    }
     _colorScheme = nil
     wrappedView = PreferredColorSchemeWrapper {
-      AnyView(wrappedView)
+      Self.withoutScrollEdgeEffects(AnyView(wrappedView))
     } colorSchemeUpdater: { scheme in
       _colorScheme = scheme
     }
@@ -49,6 +43,19 @@ extension View {
     let windowRootVC = Self.setupRootVC(subVC: controller)
     window.rootViewController = windowRootVC
     return controller
+  }
+
+  /// A scroll view's edge effect (iOS 26) blurs what's behind its top and bottom edges. In
+  /// previews expanded past the screen's height, the snapshot drew it as an opaque black band;
+  /// at rest, with nothing scrolled under the edges, it shows nothing anyway. Only SwiftUI scroll
+  /// views take this; a UIKit `UIScrollView` keeps its effect.
+  private static func withoutScrollEdgeEffects(_ view: AnyView) -> AnyView {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      return AnyView(view.scrollEdgeEffectHidden())
+    }
+    #endif
+    return view
   }
 
   public func snapshot(
