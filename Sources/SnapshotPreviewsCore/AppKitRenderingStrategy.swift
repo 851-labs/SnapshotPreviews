@@ -145,8 +145,9 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   }
 
   /// Renders `preview` again in the titled window and captures it as the screen shows it. The
-  /// window sits off screen but for one point at the display's corner: ScreenCaptureKit captures
-  /// windows that are partly on screen, whatever their size, but not ones entirely off it.
+  /// window sits off screen but for a one-point column at the display's right edge:
+  /// ScreenCaptureKit captures windows that are partly on screen, whatever their size, but not
+  /// ones entirely off it.
   @available(macOS 14.0, *)
   @MainActor private func captureInChrome(
     _ preview: SnapshotPreviewsCore.Preview,
@@ -154,17 +155,15 @@ public class AppKitRenderingStrategy: RenderingStrategy {
   ) {
     let window = chromeWindow
     let screen = NSScreen.main?.frame ?? .zero
-    // Far off screen while it's laid out, since it grows from its bottom edge.
-    window.setFrameOrigin(NSPoint(x: screen.minX - 20_000, y: screen.minY - 20_000))
+    // One point in from the screen's right edge, so that however the window grows as it's laid
+    // out (right, and up or down), only a one-point column of it is on screen. The window server
+    // keeps a partly visible window's surface at its size; one entirely off screen got a capture
+    // of its old surface, stretched (851-2750).
+    window.setFrameOrigin(NSPoint(x: screen.maxX - 1, y: screen.minY + 1))
     window.orderFront(nil)
     layOut(preview, in: window) { _, _, _ in
-      let size = window.frame.size
-      window.setFrameOrigin(
-        NSPoint(x: screen.minX - size.width + 1, y: screen.minY - size.height + 1))
       // The frame view too, for its title bar and toolbar.
       if let view = window.contentView?.superview ?? window.contentView { Self.holdStill(view) }
-      // Drawn again in full where it is now: off screen, the window server may have kept a
-      // surface from before its last resize.
       window.display()
       CATransaction.flush()
       Task { @MainActor in
@@ -190,8 +189,7 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     view.subviews.forEach(holdStill)
   }
 
-  /// The window server didn't show a window at its size, or kept changing it, in time, e.g. while
-  /// the screen is locked.
+  /// The window server didn't show a window at its size in time, e.g. while the screen is locked.
   struct WindowNotShown: Error {
     let size: CGSize
   }
@@ -223,19 +221,21 @@ public class AppKitRenderingStrategy: RenderingStrategy {
       configuration.ignoreShadowsSingleWindow = true
       configuration.showsCursor = false
       configuration.captureResolution = .best
-      // Captured until two in a row match: the reported frame can be ahead of the surface, which
-      // the window server then stretches to it (a resampled image).
-      var previous: CGImage?
-      for _ in 0..<20 {
+      // Captured until two in a row match, so nothing still settling is caught midway. One that
+      // never settles (a `TimelineView`, say) keeps its last capture, for `check` to catch.
+      let attempts = 10
+      var previous: Data?
+      for attempt in 1...attempts {
         let image = try await SCScreenshotManager.captureImage(
           contentFilter: filter, configuration: configuration)
-        if let pixels = previous?.pixelData, pixels == image.pixelData {
+        let pixels = image.pixels
+        if attempt == attempts || pixels == nil || pixels == previous {
           return .success(NSImage(cgImage: image, size: filter.contentRect.size))
         }
-        previous = image
+        previous = pixels
         try await Task.sleep(for: .milliseconds(50))
       }
-      throw WindowNotShown(size: window.frame.size)
+      preconditionFailure("The last attempt returns")
     } catch {
       return .failure(RenderingError.screenCaptureFailed(error))
     }
@@ -406,9 +406,17 @@ extension NSView {
 }
 
 extension CGImage {
-  /// Its pixels, to compare captures.
-  var pixelData: Data? {
-    dataProvider?.data as Data?
+  /// Its pixels, row by row without any padding, to compare captures.
+  var pixels: Data? {
+    guard let data = dataProvider?.data as Data? else { return nil }
+    let rowLength = width * bitsPerPixel / 8
+    guard bytesPerRow != rowLength else { return data }
+    var pixels = Data(capacity: rowLength * height)
+    for row in 0..<height {
+      let start = data.startIndex + row * bytesPerRow
+      pixels.append(data[start..<(start + rowLength)])
+    }
+    return pixels
   }
 }
 
