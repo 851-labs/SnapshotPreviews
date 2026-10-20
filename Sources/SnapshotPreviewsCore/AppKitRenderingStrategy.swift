@@ -163,7 +163,10 @@ public class AppKitRenderingStrategy: RenderingStrategy {
         NSPoint(x: screen.minX - size.width + 1, y: screen.minY - size.height + 1))
       // The frame view too, for its title bar and toolbar.
       if let view = window.contentView?.superview ?? window.contentView { Self.holdStill(view) }
-      window.displayIfNeeded()
+      // Drawn again in full where it is now: off screen, the window server may have kept a
+      // surface from before its last resize.
+      window.display()
+      CATransaction.flush()
       Task { @MainActor in
         completion(await Self.screenCapture(window))
       }
@@ -187,7 +190,8 @@ public class AppKitRenderingStrategy: RenderingStrategy {
     view.subviews.forEach(holdStill)
   }
 
-  /// The window server didn't show a window at its size in time, e.g. while the screen is locked.
+  /// The window server didn't show a window at its size, or kept changing it, in time, e.g. while
+  /// the screen is locked.
   struct WindowNotShown: Error {
     let size: CGSize
   }
@@ -219,9 +223,19 @@ public class AppKitRenderingStrategy: RenderingStrategy {
       configuration.ignoreShadowsSingleWindow = true
       configuration.showsCursor = false
       configuration.captureResolution = .best
-      let image = try await SCScreenshotManager.captureImage(
-        contentFilter: filter, configuration: configuration)
-      return .success(NSImage(cgImage: image, size: filter.contentRect.size))
+      // Captured until two in a row match: the reported frame can be ahead of the surface, which
+      // the window server then stretches to it (a resampled image).
+      var previous: CGImage?
+      for _ in 0..<20 {
+        let image = try await SCScreenshotManager.captureImage(
+          contentFilter: filter, configuration: configuration)
+        if let pixels = previous?.pixelData, pixels == image.pixelData {
+          return .success(NSImage(cgImage: image, size: filter.contentRect.size))
+        }
+        previous = image
+        try await Task.sleep(for: .milliseconds(50))
+      }
+      throw WindowNotShown(size: window.frame.size)
     } catch {
       return .failure(RenderingError.screenCaptureFailed(error))
     }
@@ -388,6 +402,13 @@ extension NSView {
       return nil
     }
     return NSImage(cgImage: cgImage, size: bounds.size)
+  }
+}
+
+extension CGImage {
+  /// Its pixels, to compare captures.
+  var pixelData: Data? {
+    dataProvider?.data as Data?
   }
 }
 
