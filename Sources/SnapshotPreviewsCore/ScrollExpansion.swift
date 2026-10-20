@@ -42,19 +42,22 @@ extension ScrollExpansionProviding {
     let supportsExpansion = supportsExpansion
     let scrollView = firstScrollView
     if let scrollView, supportsExpansion {
-      let diff = Int(scrollView.contentHeight - scrollView.visibleContentHeight)
-      if abs(diff) > 0 {
+      // The whole difference, fractions included: truncating it to whole points dropped up to a
+      // point per pass, and lists that settle over a different number of passes ended up
+      // different heights. Within a hundredth of a point, it's done.
+      let diff = scrollView.contentHeight - scrollView.visibleContentHeight
+      if abs(diff) >= 0.01 {
         if previousHeight != nil || diff > 0 {
           if let previousHeight {
             // Check if expansion isn't working and we should give up.
             // Could happen if the view is constrained to not grow, such as a half sheet
-            guard abs(previousHeight - scrollView.visibleContentHeight) >= 1 else {
+            guard abs(previousHeight - scrollView.visibleContentHeight) >= 0.01 else {
               complete()
               return
             }
           }
           previousHeight = scrollView.visibleContentHeight
-          heightAnchor.constant += CGFloat(diff)
+          heightAnchor.constant += diff
         } else {
           complete()
         }
