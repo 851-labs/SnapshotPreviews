@@ -31,6 +31,12 @@ extension View {
     var wrappedView: any View = self.transaction { transaction in
       transaction.disablesAnimations = true
     }
+    // A scroll view's edge effect blurs what's behind its top and bottom edges, which drawing
+    // the view off screen can't do: it comes out as a black band. At rest, with nothing scrolled
+    // under the edges, it shows nothing anyway.
+    if #available(iOS 26.0, *) {
+      wrappedView = AnyView(wrappedView).scrollEdgeEffectHidden()
+    }
     _colorScheme = nil
     wrappedView = PreferredColorSchemeWrapper {
       AnyView(wrappedView)
